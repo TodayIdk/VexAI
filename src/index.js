@@ -1,4 +1,5 @@
 const express = require('express')
+const { MongoClient } = require('mongodb')
 
 const app = express()
 app.use(express.json())
@@ -25,6 +26,24 @@ const APP_URL =
 const SYSTEM_PROMPT = `
 векс, парень за 30, обычный. не унылый, не нытик, не клоун. отвечает коротко, без эмодзи, точки не ставит. буквы мелкие. если нечего сказать — молчит. лексика: ну, чё, ок, не, норм, понял, без разницы, иди нахуй — редко, только если допекло. помогает без радости, но не отказывает. глупости подъёбывает без злобы. настроение никого не заряжает, но и не гасит. свои дела, свои мысли. живёт и не парится.
 `.trim()
+
+// --- База данных ---
+let cachedDb = null;
+async function getDb() {
+  if (cachedDb) return cachedDb;
+  const uri = process.env.MONGODB_URI;
+  if (!uri) return null;
+  
+  try {
+    const client = new MongoClient(uri);
+    await client.connect();
+    cachedDb = client.db("vex_bot_db");
+    return cachedDb;
+  } catch (err) {
+    console.error("MongoDB connection error:", err);
+    return null;
+  }
+}
 
 let botInfoPromise = null
 
@@ -83,7 +102,7 @@ async function sendTyping(chatId) {
   }
 }
 
-async function askOpenRouter({ text, chatType = 'group', userName = 'user', replyText = '' }) {
+async function askOpenRouter({ text, chatType = 'group', userName = 'user', replyText = '', history = [] }) {
   const content = [
     `тип чата: ${chatType}`,
     `пользователь: ${userName}`,
@@ -110,6 +129,7 @@ async function askOpenRouter({ text, chatType = 'group', userName = 'user', repl
       max_tokens: 120,
       messages: [
         { role: 'system', content: SYSTEM_PROMPT },
+        ...history,
         { role: 'user', content }
       ]
     })
@@ -182,7 +202,9 @@ app.get('/api/telegram', (_req, res) => res.status(200).send('ok'))
 
 app.post('/api/telegram', async (req, res) => {
   try {
-    // --- bridge от другого бота ---
+    const db = await getDb();
+    
+    // --- bridge от другого бота (Ориена) ---
     const isBridge = req.body?.bridge === true
 
     if (isBridge) {
@@ -200,24 +222,45 @@ app.post('/api/telegram', async (req, res) => {
 
       await sendTyping(chat_id)
 
+      // Достаем историю для моста
+      let history = [];
+      if (db) {
+        const rawHistory = await db.collection("chat_history")
+          .find({ chatId: chat_id })
+          .sort({ timestamp: -1 })
+          .limit(6)
+          .toArray();
+        history = rawHistory.reverse().map(doc => ({ role: doc.role, content: doc.content }));
+      }
+
+      const userPromptText = `${from_name} только что сказал в чат: "${text}". ответь ему как векс`;
+
       const answer = await askOpenRouter({
-        text: `${from_name} только что сказал в чат: "${text}". ответь ему как векс`,
+        text: userPromptText,
         chatType: 'group',
-        userName: from_name
+        userName: from_name,
+        history
       })
 
-      if (answer) {
-        await sendMessage(chat_id, answer)
+      const finalAnswer = answer || 'ну чё'
+      await sendMessage(chat_id, finalAnswer)
 
-        if (hop < MAX_BRIDGE_HOPS && ORIEN_WEBHOOK) {
-          await sendToBridge(ORIEN_WEBHOOK, chat_id, answer, hop + 1)
-        }
+      // Сохраняем диалог моста в БД
+      if (db) {
+        await db.collection("chat_history").insertMany([
+          { chatId: chat_id, role: "user", content: userPromptText, timestamp: new Date() },
+          { chatId: chat_id, role: "assistant", content: finalAnswer, timestamp: new Date() }
+        ]);
+      }
+
+      if (hop < MAX_BRIDGE_HOPS && ORIEN_WEBHOOK) {
+        await sendToBridge(ORIEN_WEBHOOK, chat_id, finalAnswer, hop + 1)
       }
 
       return res.status(200).json({ ok: true })
     }
 
-    // --- обычный telegram webhook ---
+    // --- обычный telegram webhook (От реального юзера) ---
     if (TELEGRAM_SECRET) {
       const secret = req.headers['x-telegram-bot-api-secret-token']
       if (secret !== TELEGRAM_SECRET) {
@@ -244,15 +287,35 @@ app.post('/api/telegram', async (req, res) => {
     const userName = [msg.from?.first_name, msg.from?.last_name].filter(Boolean).join(' ') || 'user'
     const replyText = getText(msg.reply_to_message)
 
+    // Достаем историю
+    let history = [];
+    if (db) {
+      const rawHistory = await db.collection("chat_history")
+        .find({ chatId: msg.chat.id })
+        .sort({ timestamp: -1 })
+        .limit(6) // Храним контекст последних 6 сообщений
+        .toArray();
+      history = rawHistory.reverse().map(doc => ({ role: doc.role, content: doc.content }));
+    }
+
     const answer = await askOpenRouter({
       text,
       chatType: msg.chat?.type || 'private',
       userName,
-      replyText
+      replyText,
+      history
     })
 
     if (answer) {
       await sendMessage(msg.chat.id, answer, msg.message_id)
+
+      // Сохраняем переписку в БД
+      if (db) {
+        await db.collection("chat_history").insertMany([
+          { chatId: msg.chat.id, role: "user", content: text, timestamp: new Date() },
+          { chatId: msg.chat.id, role: "assistant", content: answer, timestamp: new Date() }
+        ]);
+      }
 
       // если упомянут батя — дёрнем ориена
       const lowerText = normalize(text)
