@@ -68,7 +68,6 @@ function shouldReply(msg, botInfo) {
   const username = botInfo.username ? `@${botInfo.username.toLowerCase()}` : ''
   if (username && text.includes(username)) return true
 
-  // если просто написали "векс" или любой триггер
   if (TRIGGERS.some(trigger => text.includes(trigger))) return true
 
   return false
