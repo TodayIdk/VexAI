@@ -1,9 +1,8 @@
 {
   "name": "vex-bot",
   "version": "1.0.0",
-  "main": "api/telegram.js",
   "private": true,
   "engines": {
-    "node": ">=18"
+    "node": "20.x"
   }
 }
