@@ -4,9 +4,8 @@ const app = express()
 app.use(express.json())
 
 const TG_TOKEN = process.env.TG_TOKEN
-const AI_MODEL = process.env.AI_MODEL || 'gpt-4-all'
-const AI_API_KEY = process.env.AI_API_KEY || 'sk-OsMMq65tXdfOIlTUYtocSL7NCsmA7CerN77OkEv29dODg1EA'
-const AI_BASE_URL = process.env.AI_BASE_URL || 'https://api.gptgod.online'
+const OPENROUTER_KEY = process.env.OPENROUTER_KEY
+const AI_MODEL = process.env.AI_MODEL || 'deepseek/deepseek-chat'
 const TELEGRAM_SECRET = process.env.TELEGRAM_SECRET || ''
 const TRIGGERS = (process.env.TRIGGERS || 'векс,вексаи,vex,vexai')
   .split(',')
@@ -18,7 +17,10 @@ const BRIDGE_SECRET = process.env.BRIDGE_SECRET || ''
 const MAX_BRIDGE_HOPS = parseInt(process.env.MAX_BRIDGE_HOPS || '4', 10)
 
 const TG_API = `https://api.telegram.org/bot${TG_TOKEN}`
-const AI_API = `${AI_BASE_URL}/v1/chat/completions`
+const OR_API = 'https://openrouter.ai/api/v1/chat/completions'
+const APP_URL =
+  process.env.APP_URL ||
+  (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : 'https://example.com')
 
 const SYSTEM_PROMPT = `
 векс, парень за 30, обычный. не унылый, не нытик, не клоун. отвечает коротко, без эмодзи, точки не ставит. буквы мелкие. если нечего сказать — молчит. лексика: ну, чё, ок, не, норм, понял, без разницы, иди нахуй — редко, только если допекло. помогает без радости, но не отказывает. глупости подъёбывает без злобы. настроение никого не заряжает, но и не гасит. свои дела, свои мысли. живёт и не парится.
@@ -45,6 +47,7 @@ async function getBotInfo() {
         return data.result
       })
   }
+
   return botInfoPromise
 }
 
@@ -80,7 +83,7 @@ async function sendTyping(chatId) {
   }
 }
 
-async function askAI({ text, chatType = 'group', userName = 'user', replyText = '' }) {
+async function askOpenRouter({ text, chatType = 'group', userName = 'user', replyText = '' }) {
   const content = [
     `тип чата: ${chatType}`,
     `пользователь: ${userName}`,
@@ -90,11 +93,13 @@ async function askAI({ text, chatType = 'group', userName = 'user', replyText = 
     .filter(Boolean)
     .join('\n')
 
-  const response = await fetch(AI_API, {
+  const response = await fetch(OR_API, {
     method: 'POST',
     headers: {
+      Authorization: `Bearer ${OPENROUTER_KEY}`,
       'Content-Type': 'application/json',
-      'Authorization': `Bearer ${AI_API_KEY}`
+      'HTTP-Referer': APP_URL,
+      'X-Title': 'Vex Telegram Bot'
     },
     body: JSON.stringify({
       model: AI_MODEL,
@@ -110,12 +115,12 @@ async function askAI({ text, chatType = 'group', userName = 'user', replyText = 
     })
   })
 
+  const data = await response.json()
+
   if (!response.ok) {
-    const errText = await response.text()
-    throw new Error(`ai error ${response.status}: ${errText}`)
+    throw new Error(`openrouter error ${response.status}: ${JSON.stringify(data)}`)
   }
 
-  const data = await response.json()
   const answer = data?.choices?.[0]?.message?.content?.trim() || ''
 
   return answer
@@ -195,17 +200,18 @@ app.post('/api/telegram', async (req, res) => {
 
       await sendTyping(chat_id)
 
-      const answer = await askAI({
+      const answer = await askOpenRouter({
         text: `${from_name} только что сказал в чат: "${text}". ответь ему как векс`,
         chatType: 'group',
         userName: from_name
       })
 
-      const finalAnswer = answer || 'ну чё'
-      await sendMessage(chat_id, finalAnswer)
+      if (answer) {
+        await sendMessage(chat_id, answer)
 
-      if (hop < MAX_BRIDGE_HOPS && ORIEN_WEBHOOK) {
-        await sendToBridge(ORIEN_WEBHOOK, chat_id, finalAnswer, hop + 1)
+        if (hop < MAX_BRIDGE_HOPS && ORIEN_WEBHOOK) {
+          await sendToBridge(ORIEN_WEBHOOK, chat_id, answer, hop + 1)
+        }
       }
 
       return res.status(200).json({ ok: true })
@@ -238,7 +244,7 @@ app.post('/api/telegram', async (req, res) => {
     const userName = [msg.from?.first_name, msg.from?.last_name].filter(Boolean).join(' ') || 'user'
     const replyText = getText(msg.reply_to_message)
 
-    const answer = await askAI({
+    const answer = await askOpenRouter({
       text,
       chatType: msg.chat?.type || 'private',
       userName,
@@ -248,8 +254,9 @@ app.post('/api/telegram', async (req, res) => {
     if (answer) {
       await sendMessage(msg.chat.id, answer, msg.message_id)
 
+      // если упомянут батя — дёрнем ориена
       const lowerText = normalize(text)
-      const mentionsOrien = /ориен|орин|orien|батя|отец|бать/.test(lowerText)
+      const mentionsOrien = /ориен|орин|orien|батя/.test(lowerText)
 
       if (mentionsOrien && ORIEN_WEBHOOK) {
         await sendToBridge(ORIEN_WEBHOOK, msg.chat.id, answer, 1)
