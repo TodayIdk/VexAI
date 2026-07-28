@@ -1,6 +1,11 @@
+const express = require('express')
+
+const app = express()
+app.use(express.json())
+
 const TG_TOKEN = process.env.TG_TOKEN
 const OPENROUTER_KEY = process.env.OPENROUTER_KEY
-const AI_MODEL = process.env.AI_MODEL
+const AI_MODEL = process.env.AI_MODEL || 'deepseek/deepseek-chat'
 const TELEGRAM_SECRET = process.env.TELEGRAM_SECRET || ''
 const TRIGGERS = (process.env.TRIGGERS || 'векс,вексаи,vex,vexai')
   .split(',')
@@ -46,6 +51,7 @@ async function getBotInfo() {
         return data.result
       })
   }
+
   return botInfoPromise
 }
 
@@ -58,13 +64,10 @@ function shouldReply(msg, botInfo) {
 
   const chatType = msg.chat?.type
 
-  // в лс отвечает всегда
   if (chatType === 'private') return true
 
-  // если это ответ на сообщение бота
   if (msg.reply_to_message?.from?.id === botInfo.id) return true
 
-  // если упомянули через @username
   const username = botInfo.username ? `@${botInfo.username.toLowerCase()}` : ''
   if (username && text.includes(username)) return true
 
@@ -91,7 +94,7 @@ async function askOpenRouter(msg) {
   const response = await fetch(OR_API, {
     method: 'POST',
     headers: {
-      'Authorization': `Bearer ${OPENROUTER_KEY}`,
+      Authorization: `Bearer ${OPENROUTER_KEY}`,
       'Content-Type': 'application/json',
       'HTTP-Referer': APP_URL,
       'X-Title': 'Vex Telegram Bot'
@@ -145,16 +148,16 @@ async function sendMessage(chatId, text, replyToMessageId) {
   }
 }
 
-module.exports = async (req, res) => {
+app.get('/', (req, res) => {
+  res.status(200).send('ok')
+})
+
+app.get('/api/telegram', (req, res) => {
+  res.status(200).send('ok')
+})
+
+app.post('/api/telegram', async (req, res) => {
   try {
-    if (req.method === 'GET') {
-      return res.status(200).send('ok')
-    }
-
-    if (req.method !== 'POST') {
-      return res.status(405).send('method not allowed')
-    }
-
     if (TELEGRAM_SECRET) {
       const secret = req.headers['x-telegram-bot-api-secret-token']
       if (secret !== TELEGRAM_SECRET) {
@@ -162,7 +165,7 @@ module.exports = async (req, res) => {
       }
     }
 
-    const update = typeof req.body === 'string' ? JSON.parse(req.body) : req.body
+    const update = req.body || {}
     const msg = update?.message
 
     if (!msg) {
@@ -186,4 +189,11 @@ module.exports = async (req, res) => {
     console.error(err)
     return res.status(200).json({ ok: true })
   }
-}
+})
+
+const port = process.env.PORT || 3000
+app.listen(port, () => {
+  console.log(`server ready on port ${port}`)
+})
+
+module.exports = app
