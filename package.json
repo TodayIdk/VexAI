@@ -1,0 +1,7 @@
+{
+  "name": "vex-bot",
+  "private": true,
+  "engines": {
+    "node": ">=18"
+  }
+}
