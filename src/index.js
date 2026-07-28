@@ -76,6 +76,21 @@ function shouldReply(msg, botInfo) {
   return false
 }
 
+async function sendTyping(chatId) {
+  try {
+    await fetch(`${TG_API}/sendChatAction`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: chatId,
+        action: 'typing'
+      })
+    })
+  } catch (e) {
+    console.error('typing error:', e)
+  }
+}
+
 async function askOpenRouter(msg) {
   const text = getText(msg)
   const chatType = msg.chat?.type || 'private'
@@ -101,7 +116,7 @@ async function askOpenRouter(msg) {
     },
     body: JSON.stringify({
       model: AI_MODEL,
-      temperature: 0.3,
+      temperature: 0.8,
       max_tokens: 80,
       messages: [
         { role: 'system', content: SYSTEM_PROMPT },
@@ -178,7 +193,13 @@ app.post('/api/telegram', async (req, res) => {
       return res.status(200).json({ ok: true })
     }
 
-    const answer = await askOpenRouter(msg)
+if (!reply) {
+  return res.status(200).json({ ok: true })
+}
+
+await sendTyping(msg.chat.id)
+
+const answer = await askOpenRouter(msg)
 
     if (answer) {
       await sendMessage(msg.chat.id, answer, msg.message_id)
