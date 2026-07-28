@@ -4,9 +4,10 @@ const app = express()
 app.use(express.json())
 
 const TG_TOKEN = process.env.TG_TOKEN
-const AI_MODEL = process.env.AI_MODEL || 'openai'
+const AI_MODEL = process.env.AI_MODEL || 'gpt-4-all'
+const AI_API_KEY = process.env.AI_API_KEY || 'sk-OsMMq65tXdfOIlTUYtocSL7NCsmA7CerN77OkEv29dODg1EA'
+const AI_BASE_URL = process.env.AI_BASE_URL || 'https://api.gptgod.online'
 const TELEGRAM_SECRET = process.env.TELEGRAM_SECRET || ''
-const POLLINATIONS_TOKEN = process.env.POLLINATIONS_TOKEN || ''
 const TRIGGERS = (process.env.TRIGGERS || 'векс,вексаи,vex,vexai')
   .split(',')
   .map(x => x.trim().toLowerCase())
@@ -17,7 +18,7 @@ const BRIDGE_SECRET = process.env.BRIDGE_SECRET || ''
 const MAX_BRIDGE_HOPS = parseInt(process.env.MAX_BRIDGE_HOPS || '4', 10)
 
 const TG_API = `https://api.telegram.org/bot${TG_TOKEN}`
-const POLLINATIONS_API = 'https://text.pollinations.ai/openai'
+const AI_API = `${AI_BASE_URL}/v1/chat/completions`
 
 const SYSTEM_PROMPT = `
 векс, парень за 30, обычный. не унылый, не нытик, не клоун. отвечает коротко, без эмодзи, точки не ставит. буквы мелкие. если нечего сказать — молчит. лексика: ну, чё, ок, не, норм, понял, без разницы, иди нахуй — редко, только если допекло. помогает без радости, но не отказывает. глупости подъёбывает без злобы. настроение никого не заряжает, но и не гасит. свои дела, свои мысли. живёт и не парится.
@@ -89,12 +90,12 @@ async function askAI({ text, chatType = 'group', userName = 'user', replyText = 
     .filter(Boolean)
     .join('\n')
 
-  const headers = { 'Content-Type': 'application/json' }
-  if (POLLINATIONS_TOKEN) headers['Authorization'] = `Bearer ${POLLINATIONS_TOKEN}`
-
-  const response = await fetch(POLLINATIONS_API, {
+  const response = await fetch(AI_API, {
     method: 'POST',
-    headers,
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${AI_API_KEY}`
+    },
     body: JSON.stringify({
       model: AI_MODEL,
       temperature: 0.9,
@@ -111,7 +112,7 @@ async function askAI({ text, chatType = 'group', userName = 'user', replyText = 
 
   if (!response.ok) {
     const errText = await response.text()
-    throw new Error(`pollinations error ${response.status}: ${errText}`)
+    throw new Error(`ai error ${response.status}: ${errText}`)
   }
 
   const data = await response.json()
