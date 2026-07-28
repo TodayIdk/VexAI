@@ -2,7 +2,6 @@
   "version": 2,
   "functions": {
     "api/telegram.js": {
-      "runtime": "@vercel/node",
       "maxDuration": 10
     }
   }
