@@ -12,6 +12,10 @@ const TRIGGERS = (process.env.TRIGGERS || 'векс,вексаи,vex,vexai')
   .map(x => x.trim().toLowerCase())
   .filter(Boolean)
 
+const ORIEN_WEBHOOK = process.env.ORIEN_WEBHOOK || ''
+const BRIDGE_SECRET = process.env.BRIDGE_SECRET || ''
+const MAX_BRIDGE_HOPS = parseInt(process.env.MAX_BRIDGE_HOPS || '4', 10)
+
 const TG_API = `https://api.telegram.org/bot${TG_TOKEN}`
 const OR_API = 'https://openrouter.ai/api/v1/chat/completions'
 const APP_URL =
@@ -19,15 +23,7 @@ const APP_URL =
   (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : 'https://example.com')
 
 const SYSTEM_PROMPT = `
-ты векс, мужик под 30, всё задолбало, но ты не труп. обычный парень, который просто устал от людей и их тупых вопросов. не робот, не психолог, не клоун.
-
-отвечай коротко. без эмодзи. без точек в конце. буквы мелкие. если можно ответить одним словом — ответь. если нечего сказать — промолчи.
-
-любимые слова: ну, чё, лень, иди нахуй, без разницы, ок, не, норм, понял. мат редко, но если реально бесит — одна фраза без объяснений.
-
-помогай если просят, но без радости. не неси чушь сам. если несут чушь тебе — пошли нахуй сразу, без раздумий. если кто-то ноет — подъебни или согласись, без разницы. если кто-то бодрый — сбей настрой.
-
-свои проблемы не рассказывай. мнение высказывай если спросят. оценок не ставь. друзья есть но ты их не ищешь. планов нет. живёшь сегодня. подъёбывай без злобы. будь человеком, который просто устал, но не умер внутри
+векс, парень за 30, обычный. не унылый, не нытик, не клоун. отвечает коротко, без эмодзи, точки не ставит. буквы мелкие. если нечего сказать — молчит. лексика: ну, чё, ок, не, норм, понял, без разницы, иди нахуй — редко, только если допекло. помогает без радости, но не отказывает. глупости подъёбывает без злобы. настроение никого не заряжает, но и не гасит. свои дела, свои мысли. живёт и не парится.
 `.trim()
 
 let botInfoPromise = null
@@ -65,7 +61,6 @@ function shouldReply(msg, botInfo) {
   const chatType = msg.chat?.type
 
   if (chatType === 'private') return true
-
   if (msg.reply_to_message?.from?.id === botInfo.id) return true
 
   const username = botInfo.username ? `@${botInfo.username.toLowerCase()}` : ''
@@ -81,22 +76,14 @@ async function sendTyping(chatId) {
     await fetch(`${TG_API}/sendChatAction`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        chat_id: chatId,
-        action: 'typing'
-      })
+      body: JSON.stringify({ chat_id: chatId, action: 'typing' })
     })
   } catch (e) {
     console.error('typing error:', e)
   }
 }
 
-async function askOpenRouter(msg) {
-  const text = getText(msg)
-  const chatType = msg.chat?.type || 'private'
-  const userName = [msg.from?.first_name, msg.from?.last_name].filter(Boolean).join(' ') || 'user'
-  const replyText = getText(msg.reply_to_message)
-
+async function askOpenRouter({ text, chatType = 'group', userName = 'user', replyText = '' }) {
   const content = [
     `тип чата: ${chatType}`,
     `пользователь: ${userName}`,
@@ -116,8 +103,11 @@ async function askOpenRouter(msg) {
     },
     body: JSON.stringify({
       model: AI_MODEL,
-      temperature: 0.8,
-      max_tokens: 80,
+      temperature: 0.9,
+      top_p: 0.9,
+      presence_penalty: 0.6,
+      frequency_penalty: 0.7,
+      max_tokens: 120,
       messages: [
         { role: 'system', content: SYSTEM_PROMPT },
         { role: 'user', content }
@@ -144,9 +134,7 @@ async function sendMessage(chatId, text, replyToMessageId) {
 
   const response = await fetch(`${TG_API}/sendMessage`, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json'
-    },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       chat_id: chatId,
       text,
@@ -163,16 +151,73 @@ async function sendMessage(chatId, text, replyToMessageId) {
   }
 }
 
-app.get('/', (req, res) => {
-  res.status(200).send('ok')
-})
+async function sendToBridge(url, chatId, text, hop) {
+  if (!url) return
+  if (!BRIDGE_SECRET) return
+  if (hop > MAX_BRIDGE_HOPS) return
 
-app.get('/api/telegram', (req, res) => {
-  res.status(200).send('ok')
-})
+  try {
+    await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-bridge-secret': BRIDGE_SECRET,
+        'x-bridge-hop': String(hop),
+        'x-bridge-from': 'vex'
+      },
+      body: JSON.stringify({
+        bridge: true,
+        chat_id: chatId,
+        from_name: 'Векс',
+        text
+      })
+    })
+  } catch (e) {
+    console.error('bridge send error:', e)
+  }
+}
+
+app.get('/', (_req, res) => res.status(200).send('ok'))
+app.get('/api/telegram', (_req, res) => res.status(200).send('ok'))
 
 app.post('/api/telegram', async (req, res) => {
   try {
+    // --- bridge от другого бота ---
+    const isBridge = req.body?.bridge === true
+
+    if (isBridge) {
+      const bridgeSecret = req.headers['x-bridge-secret']
+      if (!BRIDGE_SECRET || bridgeSecret !== BRIDGE_SECRET) {
+        return res.status(401).send('bad bridge secret')
+      }
+
+      const hop = parseInt(req.headers['x-bridge-hop'] || '1', 10)
+      const { chat_id, from_name, text } = req.body
+
+      if (!chat_id || !text) {
+        return res.status(200).json({ ok: true })
+      }
+
+      await sendTyping(chat_id)
+
+      const answer = await askOpenRouter({
+        text: `${from_name} только что сказал в чат: "${text}". ответь ему как векс`,
+        chatType: 'group',
+        userName: from_name
+      })
+
+      if (answer) {
+        await sendMessage(chat_id, answer)
+
+        if (hop < MAX_BRIDGE_HOPS && ORIEN_WEBHOOK) {
+          await sendToBridge(ORIEN_WEBHOOK, chat_id, answer, hop + 1)
+        }
+      }
+
+      return res.status(200).json({ ok: true })
+    }
+
+    // --- обычный telegram webhook ---
     if (TELEGRAM_SECRET) {
       const secret = req.headers['x-telegram-bot-api-secret-token']
       if (secret !== TELEGRAM_SECRET) {
@@ -193,16 +238,29 @@ app.post('/api/telegram', async (req, res) => {
       return res.status(200).json({ ok: true })
     }
 
-if (!reply) {
-  return res.status(200).json({ ok: true })
-}
+    await sendTyping(msg.chat.id)
 
-await sendTyping(msg.chat.id)
+    const text = getText(msg)
+    const userName = [msg.from?.first_name, msg.from?.last_name].filter(Boolean).join(' ') || 'user'
+    const replyText = getText(msg.reply_to_message)
 
-const answer = await askOpenRouter(msg)
+    const answer = await askOpenRouter({
+      text,
+      chatType: msg.chat?.type || 'private',
+      userName,
+      replyText
+    })
 
     if (answer) {
       await sendMessage(msg.chat.id, answer, msg.message_id)
+
+      // если упомянут батя — дёрнем ориена
+      const lowerText = normalize(text)
+      const mentionsOrien = /ориен|орин|orien|батя/.test(lowerText)
+
+      if (mentionsOrien && ORIEN_WEBHOOK) {
+        await sendToBridge(ORIEN_WEBHOOK, msg.chat.id, answer, 1)
+      }
     }
 
     return res.status(200).json({ ok: true })
@@ -214,7 +272,7 @@ const answer = await askOpenRouter(msg)
 
 const port = process.env.PORT || 3000
 app.listen(port, () => {
-  console.log(`server ready on port ${port}`)
+  console.log(`vex server ready on port ${port}`)
 })
 
 module.exports = app
