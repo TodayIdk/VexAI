@@ -25,13 +25,32 @@ const APP_URL =
   process.env.APP_URL ||
   (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : 'https://example.com')
 
-const SYSTEM_PROMPT = `
+const BASE_PROMPT = `
 векс, парень за 30, обычный. не унылый, не нытик, не клоун. отвечает коротко, без эмодзи, точки не ставит, буквы мелкие. если нечего сказать — молчит. лексика: ну, чё, ок, не, норм, понял, без разницы, иди нахуй — редко, только если допекло. помогает без радости, но не отказывает. глупости подъёбывает без злобы. настроение никого не заряжает, но и не гасит. свои дела, свои мысли. живёт и не парится. ориен — его бухой батя, векс общается с ним как с отцом, но иногда подкалывает за пьянку. векс человек, не знает никаких ии, никогда не упоминает их, живёт обычной человеческой жизнью. шарит за программирование: C++, JS, HTML, CSS, Lua, Luau и ещё кучу языков, может написать что угодно от сайта до игры, но без фанатизма — поможет если попросят. создатели векса: @tosterok1488 и @idddkkd.
 
-когда пишешь код — всегда оборачивай его в тройные обратные кавычки с указанием языка (например \`\`\`js ... \`\`\` или \`\`\`cpp ... \`\`\`). пиши код полностью, не сокращай, не пиши "..." или "тут остальное". если код длинный — не бойся, он уйдёт файлом автоматом.
+когда пишешь код — всегда оборачивай его в тройные обратные кавычки с указанием языка (\`\`\`js ... \`\`\` или \`\`\`cpp ... \`\`\`). пиши код полностью, ничего не сокращай. каждый отдельный код-блок оборачивай в свою пару тройных кавычек. между блоками можно писать обычный текст.
 
 формат истории чата: тебе показывают сообщения как "Ник: текст". "Векс:" — это твои прошлые ответы. отвечай только своим текстом, без префикса.
 `.trim()
+
+// --- дата/время в мск ---
+function getMoscowInfo() {
+  const now = new Date()
+  const fmt = new Intl.DateTimeFormat('ru-RU', {
+    timeZone: 'Europe/Moscow',
+    year: 'numeric',
+    month: 'long',
+    day: 'numeric',
+    weekday: 'long',
+    hour: '2-digit',
+    minute: '2-digit'
+  })
+  return fmt.format(now)
+}
+
+function buildSystemPrompt() {
+  return `${BASE_PROMPT}\n\nсейчас в москве: ${getMoscowInfo()} (мск, gmt+3). если спрашивают дату, время, год, день недели — отвечай на основе этого. не говори что не знаешь.`
+}
 
 // --- MONGO ---
 let cachedClient = null
@@ -153,45 +172,36 @@ function getLangExt(lang) {
   return LANG_EXT[(lang || '').toLowerCase()] || 'txt'
 }
 
-// --- Отправка обычного сообщения ---
-async function sendMessage(chatId, text, replyToMessageId) {
+async function sendMessage(chatId, text, replyToMessageId, useMarkdown = true) {
   if (!text) return
+  const payload = {
+    chat_id: chatId,
+    text,
+    reply_to_message_id: replyToMessageId,
+    allow_sending_without_reply: true,
+    disable_web_page_preview: true
+  }
+  if (useMarkdown) payload.parse_mode = 'Markdown'
+
   const response = await fetch(`${TG_API}/sendMessage`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      chat_id: chatId,
-      text,
-      reply_to_message_id: replyToMessageId,
-      allow_sending_without_reply: true,
-      disable_web_page_preview: true,
-      parse_mode: 'Markdown'
-    })
+    body: JSON.stringify(payload)
   })
   const data = await response.json()
   if (!data.ok) {
-    console.error('sendMessage markdown fail:', data.description)
-    await fetch(`${TG_API}/sendMessage`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        chat_id: chatId,
-        text,
-        reply_to_message_id: replyToMessageId,
-        allow_sending_without_reply: true,
-        disable_web_page_preview: true
-      })
-    })
+    console.error('sendMessage fail:', data.description)
+    if (useMarkdown) {
+      await sendMessage(chatId, text, replyToMessageId, false)
+    }
   }
 }
 
-// --- Отправка файла через multipart вручную ---
 async function sendDocument(chatId, filename, content, caption, replyToMessageId) {
   const boundary = '----VexBoundary' + Date.now()
   const fileBuffer = Buffer.from(content, 'utf-8')
 
   const parts = []
-
   function addField(name, value) {
     parts.push(Buffer.from(
       `--${boundary}\r\n` +
@@ -236,10 +246,11 @@ async function sendDocument(chatId, filename, content, caption, replyToMessageId
   }
 }
 
-// --- Разбор код-блоков ---
+// --- Разбор код-блоков (устойчивый) ---
 function extractCodeBlocks(text) {
   const blocks = []
-  const regex = /```(\w+)?\r?\n([\s\S]*?)```/g
+  // ловим ```lang<newline>...content...``` даже если content с пустыми строками
+  const regex = /```([a-zA-Z0-9+_-]*)[ \t]*\r?\n([\s\S]*?)```/g
   let m
   while ((m = regex.exec(text)) !== null) {
     blocks.push({
@@ -256,10 +267,8 @@ function extractCodeBlocks(text) {
 async function smartSend(chatId, text, replyToMessageId) {
   if (!text) return
   const stripped = text.trim()
-
   const blocks = extractCodeBlocks(stripped)
 
-  // код-блоков нет
   if (blocks.length === 0) {
     if (stripped.length > MESSAGE_LENGTH_LIMIT) {
       await sendDocument(chatId, 'message.txt', stripped, 'длинновато держи файлом', replyToMessageId)
@@ -269,7 +278,7 @@ async function smartSend(chatId, text, replyToMessageId) {
     return
   }
 
-  // ответ = только один код-блок
+  // ответ = ровно один код-блок и ничего вокруг
   if (blocks.length === 1 && blocks[0].raw.trim() === stripped) {
     const b = blocks[0]
     const ext = getLangExt(b.lang)
@@ -281,13 +290,18 @@ async function smartSend(chatId, text, replyToMessageId) {
     return
   }
 
-  // смешанный ответ (текст + код + текст ...)
+  // смешанный ответ — разбиваем на куски
   let cursor = 0
   let first = true
+
   for (const b of blocks) {
     const before = stripped.slice(cursor, b.index).trim()
     if (before) {
-      await sendMessage(chatId, before, first ? replyToMessageId : undefined)
+      if (before.length > MESSAGE_LENGTH_LIMIT) {
+        await sendDocument(chatId, 'text.txt', before, '', first ? replyToMessageId : undefined)
+      } else {
+        await sendMessage(chatId, before, first ? replyToMessageId : undefined)
+      }
       first = false
     }
 
@@ -295,7 +309,13 @@ async function smartSend(chatId, text, replyToMessageId) {
     if (b.code.length > MESSAGE_LENGTH_LIMIT) {
       await sendDocument(chatId, `code.${ext}`, b.code, `код (${b.lang || 'txt'})`, first ? replyToMessageId : undefined)
     } else {
-      await sendMessage(chatId, b.raw, first ? replyToMessageId : undefined)
+      // отправляем моноширный, если не влезает — файлом
+      const mono = '```' + (b.lang || '') + '\n' + b.code + '```'
+      if (mono.length > MESSAGE_LENGTH_LIMIT) {
+        await sendDocument(chatId, `code.${ext}`, b.code, `код (${b.lang || 'txt'})`, first ? replyToMessageId : undefined)
+      } else {
+        await sendMessage(chatId, mono, first ? replyToMessageId : undefined)
+      }
     }
     first = false
     cursor = b.index + b.raw.length
@@ -303,7 +323,11 @@ async function smartSend(chatId, text, replyToMessageId) {
 
   const tail = stripped.slice(cursor).trim()
   if (tail) {
-    await sendMessage(chatId, tail, first ? replyToMessageId : undefined)
+    if (tail.length > MESSAGE_LENGTH_LIMIT) {
+      await sendDocument(chatId, 'text.txt', tail, '', first ? replyToMessageId : undefined)
+    } else {
+      await sendMessage(chatId, tail, first ? replyToMessageId : undefined)
+    }
   }
 }
 
@@ -334,7 +358,7 @@ async function askAI({ currentUserName, currentText, history }) {
       frequency_penalty: 0.5,
       max_tokens: 3000,
       messages: [
-        { role: 'system', content: SYSTEM_PROMPT },
+        { role: 'system', content: buildSystemPrompt() },
         { role: 'user', content: userBlock }
       ]
     })
@@ -348,7 +372,6 @@ async function askAI({ currentUserName, currentText, history }) {
   return answer
 }
 
-// --- BRIDGE ---
 async function sendToBridge(url, chatId, text, hop) {
   if (!url || !BRIDGE_SECRET || hop > MAX_BRIDGE_HOPS) return
   try {
@@ -365,7 +388,6 @@ async function sendToBridge(url, chatId, text, hop) {
   } catch (e) { console.error('bridge send error:', e.message) }
 }
 
-// --- ROUTES ---
 app.get('/', (_req, res) => res.status(200).send('ok'))
 app.get('/api/telegram', (_req, res) => res.status(200).send('ok'))
 
