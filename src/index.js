@@ -12,7 +12,7 @@ const MONGODB_URI = process.env.MONGODB_URI || ''
 
 const TRIGGERS = (process.env.TRIGGERS || 'векс,вексаи,vex,vexai')
   .split(',').map(x => x.trim().toLowerCase()).filter(Boolean)
-
+s
 const ORIEN_WEBHOOK = process.env.ORIEN_WEBHOOK || ''
 const BRIDGE_SECRET = process.env.BRIDGE_SECRET || ''
 const MAX_BRIDGE_HOPS = parseInt(process.env.MAX_BRIDGE_HOPS || '4', 10)
